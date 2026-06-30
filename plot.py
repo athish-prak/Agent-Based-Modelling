@@ -1,15 +1,6 @@
-"""Create the static plots and CSV traces used by the project.
-
-Inputs:
-    A loaded Config object, an output folder, and optionally a mean rest time.
-
-Outputs:
-    PNG figures and CSV files for the paper reproduction plots and the added
-    learning/cognitive-behaviour plots.
-"""
-
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 from pathlib import Path
 import tempfile
@@ -21,430 +12,1009 @@ _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CONFIG_DIR))
 os.environ.setdefault("XDG_CACHE_HOME", str(_CACHE_DIR))
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
+from agents import MicroModel
 from config import Config
 from macro import MacroModel
-from agents import MicroModel
+
+
+SWARM_SIZES = [8, 16, 32, 64, 128]
+FOOD_MULTIPLIERS = [0.25, 0.5, 1.0, 2.0, 4.0]
 
 
 def ensure_dir(path: str | Path) -> Path:
     """Create an output folder if needed and return it as a Path."""
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    out = Path(path)
+    out.mkdir(parents=True, exist_ok=True)
+    return out
 
 
-def _paper_style() -> None:
-    """Apply the compact plotting style used by the paper-style figures."""
-    plt.rcParams.update(
-        {
-            "font.family": "serif",
-            "font.size": 9,
-            "axes.titlesize": 9,
-            "axes.labelsize": 9,
-            "legend.fontsize": 9,
-            "xtick.direction": "in",
-            "ytick.direction": "in",
-            "xtick.top": True,
-            "ytick.right": True,
-            "axes.grid": False,
-        }
-    )
+def output_folders(out_dir: str | Path) -> tuple[Path, Path, Path]:
+    """Create and return presentation, supporting, and data output folders.
+
+    Input:
+        out_dir is the root output folder requested by the CLI.
+
+    Output:
+        Paths for presentation plots, supporting plots, and CSV data.
+    """
+    root = ensure_dir(out_dir)
+    presentation = ensure_dir(root / "presentation_plots")
+    supporting = ensure_dir(root / "supporting_plots")
+    data = ensure_dir(root / "data")
+    return presentation, supporting, data
 
 
-def _stride_steps(cfg: Config) -> int:
-    """Convert the configured CSV stride from seconds to model steps."""
-    stride_s = float(cfg.get("run", "csv_stride_s", default=5.0))
-    return max(1, int(round(stride_s / cfg.dt)))
+def remove_known_outputs(folder: Path, names: list[str]) -> None:
+    """Remove stale generated files from an output folder.
 
+    Inputs:
+        folder is an output subfolder and names are generated filenames that can
+        be safely replaced.
 
-def _macro_trace(cfg: Config, rest_time_s: float, stride: int | None = None) -> pd.DataFrame:
-    """Run the macro model and return its sampled trace."""
-    return MacroModel(cfg, rest_time_s=rest_time_s).run(stride=stride or _stride_steps(cfg)).trace
-
-
-def _final_stride(cfg: Config) -> int:
-    """Return a stride that keeps only the first and final sampled rows."""
-    return max(1, int(round(cfg.duration_s / cfg.dt)) + 1)
-
-
-def _padded_limits(values: np.ndarray) -> tuple[float, float]:
-    """Return readable y-axis limits for data that may be positive or negative."""
-    values = np.asarray(values, dtype=float)
-    values = values[np.isfinite(values)]
-    if len(values) == 0:
-        return -1.0, 1.0
-    ymin = float(values.min())
-    ymax = float(values.max())
-    if abs(ymax - ymin) < 1e-12:
-        pad = max(1.0, abs(ymax) * 0.1)
-    else:
-        pad = 0.12 * (ymax - ymin)
-    return ymin - pad, ymax + pad
+    Output:
+        Matching files are removed when present.
+    """
+    for name in names:
+        path = folder / name
+        if path.exists():
+            path.unlink()
 
 
 def write_macro_csv(cfg: Config, out_dir: str | Path, rest_time_s: float | None = None) -> Path:
-    """Write one macro trace CSV for the requested rest time."""
-    out = ensure_dir(out_dir)
+    """Write one aggregate macro-model trace CSV.
+
+    Inputs:
+        cfg is the loaded model configuration, out_dir is the destination
+        folder, and rest_time_s optionally overrides the rest time.
+
+    Output:
+        Path to the written macro trace CSV.
+    """
+    out = ensure_dir(Path(out_dir) / "data")
     tau_r = float(rest_time_s if rest_time_s is not None else cfg.get("behaviour", "default_rest_time_s"))
-    trace = _macro_trace(cfg, tau_r)
+    trace = MacroModel(cfg, rest_time_s=tau_r).run().trace
     path = out / f"macro_trace_tau_r_{int(tau_r)}.csv"
     trace.to_csv(path, index=False)
     return path
 
 
-def plot_fig8(cfg: Config, out_dir: str | Path) -> tuple[Path, Path]:
-    """Write Fig. 8 from actual macro and repeated micro simulation runs."""
-    _paper_style()
-    out = ensure_dir(out_dir)
-    rest_times = np.array([float(x) for x in cfg.get("behaviour", "rest_times_s")], dtype=float)
-    final_stride = _final_stride(cfg)
-    runs = int(cfg.get("run", "micro_runs", default=10))
-    seed0 = int(cfg.get("run", "random_seed", default=7))
-    rows: list[dict[str, float]] = []
+def make_all_plots(
+    cfg: Config,
+    out_dir: str | Path,
+    seconds: float | None = None,
+    seeds: int = 5,
+    sample_every: float = 50.0,
+) -> list[Path]:
+    """Write the split presentation/supporting plot set and matching CSV files.
 
-    for tau_r in rest_times:
-        macro_trace = MacroModel(cfg, rest_time_s=tau_r).run(stride=final_stride).trace
-        micro_energy = []
-        for seed in range(seed0, seed0 + runs):
-            trace = MicroModel(cfg, rest_time_s=tau_r, seed=seed).run(stride=final_stride)
-            micro_energy.append(float(trace["energy"].iloc[-1]))
-        rows.append(
-            {
-                "rest_time_s": tau_r,
-                "macro_energy": float(macro_trace["energy"].iloc[-1]),
-                "micro_energy_mean": float(np.mean(micro_energy)),
-                "micro_energy_std": float(np.std(micro_energy, ddof=0)),
-                "micro_runs": float(runs),
-            }
+    Inputs:
+        cfg is the loaded configuration, out_dir receives outputs, seconds is
+        simulated duration, seeds controls repeated runs, and sample_every
+        controls time-series sampling.
+
+    Output:
+        Paths to written PNG and CSV files.
+    """
+    presentation, supporting, data = output_folders(out_dir)
+    presentation_split = ensure_dir(presentation / "split_panels")
+    supporting_split = ensure_dir(supporting / "split_panels")
+    remove_known_outputs(
+        presentation,
+        [
+            "fig_01_strategy_learning_entropy.png",
+            "fig_02_swarm_size_congestion.png",
+            "fig_03_throughput_scaling.png",
+            "fig_07_food_spawn_rate_effects.png",
+            "slide1_abm_mechanism_schematic.png",
+            "slide1_strategy_learning_entropy.png",
+            "slide2_swarm_size_congestion.png",
+            "slide2_throughput_scaling.png",
+            "slide2_food_spawn_rate_effects.png",
+        ],
+    )
+    remove_known_outputs(
+        supporting,
+        [
+            "fig_rest_time_energy_tradeoff.png",
+            "fig_sector_score_evolution.png",
+            "fig_food_spawn_rate_effects.png",
+        ],
+    )
+    remove_known_outputs(
+        data,
+        [
+            "fig_01_strategy_learning_entropy.csv",
+            "fig_02_swarm_size_congestion.csv",
+            "fig_03_throughput_scaling.csv",
+            "fig_07_food_spawn_rate_effects.csv",
+            "fig_rest_time_energy_tradeoff.csv",
+            "fig_sector_score_evolution.csv",
+            "strategy_learning_entropy.csv",
+            "swarm_size_congestion.csv",
+            "throughput_scaling.csv",
+            "food_spawn_rate_effects.csv",
+            "rest_time_energy_tradeoff.csv",
+            "sector_score_evolution.csv",
+        ],
+    )
+    seconds = float(seconds if seconds is not None else 1500.0)
+    seed0 = int(cfg.get("run", "random_seed", default=7))
+    paths: list[Path] = []
+
+    paths.append(plot_abm_mechanism_schematic(presentation / "slide1_abm_mechanism_schematic.png"))
+
+    rest = rest_time_energy_tradeoff(cfg, seconds, seeds, seed0)
+    paths.extend(write_plot_data(rest, data / "rest_time_energy_tradeoff.csv"))
+    paths.append(plot_rest_time_energy_tradeoff(rest, supporting / "fig_rest_time_energy_tradeoff.png"))
+    paths.extend(plot_rest_time_energy_tradeoff_split(rest, supporting_split))
+
+    strategy = strategy_learning_entropy(cfg, seconds, seeds, sample_every, seed0)
+    paths.extend(write_plot_data(strategy, data / "strategy_learning_entropy.csv"))
+    paths.append(plot_strategy_learning_entropy(strategy, presentation / "slide1_strategy_learning_entropy.png"))
+    paths.extend(plot_strategy_learning_entropy_split(strategy, presentation_split))
+
+    congestion = congestion_game_data(cfg, seconds, seeds, seed0)
+    paths.extend(write_plot_data(congestion, data / "swarm_size_congestion.csv"))
+    paths.append(plot_congestion_game(congestion, presentation / "slide2_swarm_size_congestion.png"))
+    paths.extend(plot_congestion_game_split(congestion, presentation_split))
+
+    scaling = congestion.copy()
+    paths.extend(write_plot_data(scaling, data / "throughput_scaling.csv"))
+    paths.append(plot_emergent_scaling(scaling, presentation / "slide2_throughput_scaling.png"))
+    paths.extend(plot_emergent_scaling_split(scaling, presentation_split))
+
+    food = food_spawn_check_data(cfg, seconds, seeds, seed0)
+    paths.extend(write_plot_data(food, data / "food_spawn_rate_effects.csv"))
+    paths.append(plot_food_spawn_check(food, supporting / "fig_food_spawn_rate_effects.png"))
+    paths.extend(plot_food_spawn_check_split(food, supporting_split))
+
+    sector = sector_scores_over_time(cfg, seconds, seeds, max(sample_every, seconds / 8.0), seed0)
+    paths.extend(write_plot_data(sector, data / "sector_score_evolution.csv"))
+    paths.append(plot_sector_heatmap(sector, supporting / "fig_sector_score_evolution.png"))
+
+    return paths
+
+
+def write_plot_data(data: pd.DataFrame, path: Path) -> list[Path]:
+    """Write a plot source CSV and return its path in a list."""
+    data.to_csv(path, index=False)
+    return [path]
+
+
+def plot_abm_mechanism_schematic(path: str | Path) -> Path:
+    """Create Slide 1A: ABM mechanism schematic.
+
+    Input:
+        path is the PNG destination.
+
+    Output:
+        Path to the saved schematic figure.
+    """
+    path = Path(path)
+    fig, ax = plt.subplots(figsize=(14.0, 7.2), constrained_layout=True)
+    ax.set_axis_off()
+    fig.suptitle("Agent-Based Structure of the Swarm Foraging Model", fontsize=18, y=0.98)
+
+    def box(x: float, y: float, w: float, h: float, title: str, body: str, color: str) -> None:
+        """Draw one rounded schematic box on the axis."""
+        patch = FancyBboxPatch(
+            (x, y),
+            w,
+            h,
+            boxstyle="round,pad=0.018,rounding_size=0.025",
+            linewidth=1.2,
+            edgecolor="#2b2b2b",
+            facecolor=color,
+        )
+        ax.add_patch(patch)
+        ax.text(x + w / 2, y + h - 0.055, title, ha="center", va="top", fontsize=12.5, fontweight="bold")
+        ax.text(x + 0.025, y + h - 0.12, body, ha="left", va="top", fontsize=10.2, linespacing=1.22)
+
+    def arrow(start: tuple[float, float], end: tuple[float, float], rad: float = 0.0) -> None:
+        """Draw one arrow between schematic elements."""
+        ax.add_patch(
+            FancyArrowPatch(
+                start,
+                end,
+                arrowstyle="-|>",
+                mutation_scale=16,
+                linewidth=1.4,
+                color="#3a3a3a",
+                connectionstyle=f"arc3,rad={rad}",
+            )
         )
 
-    data = pd.DataFrame(rows)
-    data = data.assign(
-        macro_energy_1e5=data["macro_energy"] / 1e5,
-        micro_energy_mean_1e5=data["micro_energy_mean"] / 1e5,
-        micro_energy_std_1e5=data["micro_energy_std"] / 1e5,
+    box(
+        0.04,
+        0.62,
+        0.25,
+        0.25,
+        "Individual Robot Agents",
+        "Discrete robots with identity\nOwn position, state, timer, energy\nNo central controller",
+        "#e8f1fb",
     )
-    csv_path = out / "fig8_macro_summary.csv"
-    data.to_csv(csv_path, index=False)
-
-    fig, ax = plt.subplots(figsize=(6.1, 4.1))
-    micro_handle = ax.errorbar(
-        data["rest_time_s"],
-        data["micro_energy_mean_1e5"],
-        yerr=data["micro_energy_std_1e5"],
-        fmt="o--",
-        color="blue",
-        ecolor="black",
-        elinewidth=0.7,
-        capsize=3,
-        markersize=5,
-        linewidth=0.7,
-        markerfacecolor="white",
-        markeredgewidth=0.8,
-        label="micro simulation",
+    box(
+        0.04,
+        0.28,
+        0.25,
+        0.27,
+        "Internal PFSM States",
+        "Searching\nGrabbing\nDepositing\nHoming\nResting\nAvoidance",
+        "#f3f6fa",
     )
-    macro_handle, = ax.plot(
-        data["rest_time_s"],
-        data["macro_energy_1e5"],
-        color="black",
-        linewidth=0.8,
-        label="macro model",
+    box(
+        0.375,
+        0.60,
+        0.25,
+        0.27,
+        "Local Environment Interaction",
+        "Food discovery probability\nTarget-loss probability\nEnergy cost/reward\nSpatial sector scores",
+        "#edf7ee",
     )
-    peak_i = int(np.argmax(data["macro_energy_1e5"].to_numpy()))
-    peak_tau = float(data["rest_time_s"].iloc[peak_i])
-    peak_y = float(data["macro_energy_1e5"].iloc[peak_i])
-    ax.axvline(peak_tau, color="black", linestyle="--", linewidth=0.55, dashes=(7, 7))
-    ax.axhline(peak_y, color="black", linestyle="--", linewidth=0.55, dashes=(7, 7))
-    all_y = np.concatenate(
-        [
-            data["macro_energy_1e5"].to_numpy(),
-            (data["micro_energy_mean_1e5"] - data["micro_energy_std_1e5"]).to_numpy(),
-            (data["micro_energy_mean_1e5"] + data["micro_energy_std_1e5"]).to_numpy(),
-        ]
+    box(
+        0.375,
+        0.27,
+        0.25,
+        0.25,
+        "Robot-Robot Interaction",
+        "Collision probability\nCongestion from active robots\nEach robot changes others'\npayoff environment",
+        "#fff4df",
     )
-    ymin, ymax = _padded_limits(all_y)
-    ax.set_xlim(-20, 220)
-    ax.set_ylim(ymin, ymax)
-    ax.set_xticks([0, 40, 80, 120, 160, 200])
-    ax.set_xlabel(r"$\tau_r$  (seconds)")
-    ax.set_ylabel(r"energy of swarm  ($10^5$ units)")
-    ax.legend([micro_handle, macro_handle], ["micro simulation", "macro model"], loc="best", frameon=True, fancybox=False, edgecolor="black")
-    fig.tight_layout(pad=0.8)
-    png_path = out / "fig8_macro_energy.png"
-    fig.savefig(png_path, dpi=160)
-    plt.close(fig)
-    return png_path, csv_path
-
-
-def _micro_runs(cfg: Config, rest_time_s: float, stride: int) -> list[pd.DataFrame]:
-    """Run the micro model over the configured seed range."""
-    runs = int(cfg.get("run", "micro_runs", default=10))
-    seed0 = int(cfg.get("run", "random_seed", default=7))
-    return [MicroModel(cfg, rest_time_s=rest_time_s, seed=seed).run(stride=stride) for seed in range(seed0, seed0 + runs)]
-
-
-def _micro_mean_std(frames: list[pd.DataFrame], cols: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Average the same columns across repeated micro-model runs."""
-    min_len = min(len(f) for f in frames)
-    time = frames[0]["time_s"].to_numpy()[:min_len]
-    mean = pd.DataFrame({"time_s": time})
-    std = pd.DataFrame({"time_s": time})
-    for col in cols:
-        stack = np.vstack([f[col].to_numpy()[:min_len] for f in frames])
-        mean[col] = stack.mean(axis=0)
-        std[col] = stack.std(axis=0)
-    return mean, std
-
-
-def _save_fig9(cfg: Config, out: Path, tau_r: float, macro: pd.DataFrame, micro_mean: pd.DataFrame, micro_std: pd.DataFrame) -> Path:
-    """Draw Figure 9 from already-computed macro and micro energy traces."""
-    _paper_style()
-    fig, ax = plt.subplots(figsize=(6.1, 4.0))
-    sim_handle = ax.errorbar(
-        micro_mean["time_s"],
-        micro_mean["energy"] / 1e5,
-        yerr=micro_std["energy"] / 1e5,
-        color="0.65",
-        linewidth=0.45,
-        errorevery=max(1, len(micro_mean) // 35),
-        capsize=1.5,
-        label="simulation",
+    box(
+        0.70,
+        0.58,
+        0.26,
+        0.29,
+        "Strategy Update After Trip",
+        "Trip payoff\nRisk/loss-sensitive utility\nPropensity update\nNext search/rest strategy",
+        "#f4ecf7",
     )
-    model_handle, = ax.plot(macro["time_s"], macro["energy"] / 1e5, color="red", linewidth=0.9, label="model")
-    ax.set_xlim(0, cfg.duration_s)
-    all_y = np.concatenate(
-        [
-            macro["energy"].to_numpy() / 1e5,
-            (micro_mean["energy"] - micro_std["energy"]).to_numpy() / 1e5,
-            (micro_mean["energy"] + micro_std["energy"]).to_numpy() / 1e5,
-        ]
+    box(
+        0.70,
+        0.24,
+        0.26,
+        0.25,
+        "Aggregate Swarm-Level Behaviour",
+        "Energy\nThroughput\nCollision rate\nStrategy entropy",
+        "#f0f0f0",
     )
-    ax.set_ylim(*_padded_limits(all_y))
-    ax.set_xticks(np.arange(0, cfg.duration_s + 1, 4000))
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel(r"energy of swarm  ($10^5$ units)")
-    ax.legend([sim_handle, model_handle], ["simulation", "model"], loc="upper left", frameon=True, fancybox=False, edgecolor="black")
-    fig.tight_layout(pad=0.8)
-    path = out / f"fig9_energy_tau_r_{int(tau_r)}.png"
-    fig.savefig(path, dpi=160)
+
+    arrow((0.165, 0.62), (0.165, 0.55))
+    arrow((0.29, 0.74), (0.375, 0.74))
+    arrow((0.29, 0.42), (0.375, 0.42))
+    arrow((0.625, 0.73), (0.70, 0.73))
+    arrow((0.625, 0.40), (0.70, 0.40))
+    arrow((0.83, 0.58), (0.83, 0.49))
+    arrow((0.70, 0.62), (0.29, 0.34), rad=0.18)
+
+    ax.text(
+        0.50,
+        0.08,
+        "Local state transitions and local events are measured at robot level; system-level patterns emerge from their repeated interaction.",
+        ha="center",
+        va="center",
+        fontsize=11,
+    )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    fig.savefig(path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return path
 
 
-def plot_fig9(cfg: Config, out_dir: str | Path, rest_time_s: float | None = None) -> Path:
-    """Write Figure 9 for energy over time at one rest time."""
-    out = ensure_dir(out_dir)
-    tau_r = float(rest_time_s if rest_time_s is not None else cfg.get("behaviour", "default_rest_time_s"))
-    stride = _stride_steps(cfg)
-    macro = _macro_trace(cfg, tau_r, stride)
-    micro_mean, micro_std = _micro_mean_std(_micro_runs(cfg, tau_r, stride), ["energy"])
-    return _save_fig9(cfg, out, tau_r, macro, micro_mean, micro_std)
+def copy_config(
+    cfg: Config,
+    *,
+    n_robots: int | None = None,
+    food_multiplier: float | None = None,
+) -> Config:
+    """Return a copied config with observational sweep settings changed.
 
-
-def _save_fig10(cfg: Config, out: Path, tau_r: float, macro: pd.DataFrame, micro_mean: pd.DataFrame) -> Path:
-    """Draw Figure 10 from already-computed macro and averaged micro state traces."""
-    _paper_style()
-    fig, ax = plt.subplots(figsize=(6.1, 4.05))
-    colors = {"searching": "tab:red", "resting": "tab:green", "homing": "tab:blue"}
-    for state, color in colors.items():
-        ax.plot(micro_mean["time_s"], micro_mean[state], color=color, linewidth=0.35, alpha=0.75)
-        ax.plot(macro["time_s"], macro[state], color=color, linestyle="--", linewidth=1.0)
-    ax.set_xlim(0, cfg.duration_s)
-    ax.set_ylim(0, 8)
-    ax.set_xticks([0, 5000, 10000, 15000, 20000])
-    ax.set_yticks(np.arange(0, 9, 1))
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Robots")
-    state_handles = [
-        Line2D([0], [0], color=color, linewidth=1.2, label=state.title())
-        for state, color in colors.items()
-    ]
-    series_handles = [
-        Line2D([0], [0], color="0.3", linewidth=0.6, label="Micro average"),
-        Line2D([0], [0], color="0.3", linestyle="--", linewidth=1.0, label="Macro average"),
-    ]
-    state_legend = ax.legend(
-        handles=state_handles,
-        title="State",
-        loc="upper left",
-        frameon=True,
-        fancybox=False,
-        edgecolor="black",
-    )
-    ax.add_artist(state_legend)
-    ax.legend(
-        handles=series_handles,
-        title="Series",
-        loc="upper right",
-        frameon=True,
-        fancybox=False,
-        edgecolor="black",
-    )
-    fig.tight_layout(pad=0.8)
-    path = out / f"fig10_states_tau_r_{int(tau_r)}.png"
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
-    return path
-
-
-def plot_fig10(cfg: Config, out_dir: str | Path, rest_time_s: float | None = None) -> Path:
-    """Write Figure 10 for selected state populations over time."""
-    out = ensure_dir(out_dir)
-    tau_r = float(rest_time_s if rest_time_s is not None else cfg.get("behaviour", "default_rest_time_s"))
-    stride = _stride_steps(cfg)
-    macro = _macro_trace(cfg, tau_r, stride)
-    micro_mean, _ = _micro_mean_std(_micro_runs(cfg, tau_r, stride), ["searching", "resting", "homing"])
-    return _save_fig10(cfg, out, tau_r, macro, micro_mean)
-
-
-def plot_fig11_strategy_evolution(cfg: Config, out_dir: str | Path) -> tuple[Path, Path]:
-    """Write the learning-strategy propensity plot and its CSV trace.
-
-    Input:
-        A Config object and output folder.
+    Inputs:
+        cfg is the base configuration. n_robots changes paper.n_robots when
+        provided. food_multiplier scales food.growth_rate_s when provided.
 
     Output:
-        fig11_strategy_evolution.png and fig11_strategy_evolution.csv.
+        A copied Config for a run.
     """
-    _paper_style()
-    out = ensure_dir(out_dir)
-    stride = _stride_steps(cfg)
-    seed = int(cfg.get("run", "random_seed", default=7))
-    model = MicroModel(cfg, seed=seed)
-    steps = model.world.steps(cfg.duration_s)
-    rows: list[dict[str, float]] = []
+    raw = deepcopy(cfg.raw)
+    if n_robots is not None:
+        raw["paper"]["n_robots"] = int(n_robots)
+    if food_multiplier is not None:
+        raw["food"]["growth_rate_s"] = float(cfg.get("food", "growth_rate_s")) * float(food_multiplier)
+    return Config(raw=raw, path=cfg.path)
+
+
+def run_observed_model(
+    cfg: Config,
+    seconds: float,
+    seed: int,
+    rest_time_s: float | None = None,
+) -> dict[str, float]:
+    """Run the micro model and return read-only summary metrics.
+
+    Inputs:
+        cfg is the model configuration, seconds is the simulated duration, seed
+        initializes the run, and rest_time_s optionally changes the configured
+        rest-time argument used by the existing model.
+
+    Output:
+        Energy, throughput, collision, activity, strategy, and deposit metrics.
+    """
+    model = MicroModel(cfg, rest_time_s=rest_time_s, seed=seed)
+    steps = model.world.steps(seconds)
+    final_window_start = int(0.75 * steps)
+    gamma_r_values: list[float] = []
+    active_values: list[float] = []
+    ratio_values: list[float] = []
 
     for step in range(steps):
-        model.step()
-        if step % stride == 0 or step == steps - 1:
-            strategies = [int(round(s * model.world.dt)) for s in model.agents[0].strategies]
-            propensities = np.array([agent.propensities for agent in model.agents], dtype=float)
-            mean_props = propensities.mean(axis=0)
-            row = {"time_s": (step + 1) * model.world.dt}
-            for strategy_s, value in zip(strategies, mean_props):
-                row[f"propensity_tau_r_{strategy_s}s"] = float(value)
-            rows.append(row)
+        stats = model.step()
+        gamma_r_values.append(float(stats["gamma_r"]))
+        if step >= final_window_start:
+            active_values.append(float(stats["active_fraction"]))
+            ratio_values.append(float(stats["mean_weighted_search_rest_ratio"]))
 
-    data = pd.DataFrame(rows)
-    csv_path = out / "fig11_strategy_evolution.csv"
-    data.to_csv(csv_path, index=False)
-
-    fig, ax = plt.subplots(figsize=(6.1, 4.0))
-    colors = ["tab:red", "tab:orange", "tab:green", "tab:blue"]
-    for column, color in zip(data.columns[1:], colors):
-        label = column.replace("propensity_tau_r_", r"$\tau_r$ ").replace("s", " s")
-        ax.plot(data["time_s"], data[column], label=label, color=color, linewidth=1.3)
-
-    ax.set_xlim(0, cfg.duration_s)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Mean strategy propensity")
-    ax.set_title("Strategy propensity over time")
-    ax.legend(loc="upper left", frameon=True, fancybox=False, edgecolor="black")
-    fig.tight_layout(pad=0.8)
-    png_path = out / "fig11_strategy_evolution.png"
-    fig.savefig(png_path, dpi=160)
-    plt.close(fig)
-    return png_path, csv_path
+    throughput = model.total_completed_deposit / max(seconds, model.world.dt)
+    n_robots = max(1, model.world.n_robots)
+    return {
+        "final_net_energy": float(model.energy),
+        "final_net_energy_per_robot": float(model.energy / n_robots),
+        "throughput": float(throughput),
+        "throughput_per_robot": float(throughput / n_robots),
+        "mean_collision_probability": float(np.mean(gamma_r_values)) if gamma_r_values else 0.0,
+        "mean_active_fraction": float(np.mean(active_values)) if active_values else 0.0,
+        "mean_weighted_search_rest_ratio": float(np.mean(ratio_values)) if ratio_values else 0.0,
+        "total_completed_deposit": float(model.total_completed_deposit),
+        "total_collisions": float(model.total_collisions),
+    }
 
 
-def plot_fig12_energy_divergence(cfg: Config, out_dir: str | Path) -> tuple[Path, Path]:
-    """Write the macro-vs-micro energy comparison and its CSV trace.
+def rest_time_energy_tradeoff(cfg: Config, seconds: float, seeds: int, seed0: int) -> pd.DataFrame:
+    """Measure energy, throughput, and activity across rest-time settings.
 
-    Input:
-        A Config object and output folder.
+    Inputs:
+        cfg is the model configuration, seconds is run length, seeds is the
+        number of repeated seeds, and seed0 is the first seed.
 
     Output:
-        fig12_energy_divergence.png and fig12_energy_divergence.csv.
+        Summary DataFrame for Figure 1.
     """
-    _paper_style()
-    out = ensure_dir(out_dir)
-    tau_r = float(cfg.get("behaviour", "default_rest_time_s"))
-    stride = _stride_steps(cfg)
-    macro = _macro_trace(cfg, tau_r, stride)
-    micro_mean, micro_std = _micro_mean_std(_micro_runs(cfg, tau_r, stride), ["energy"])
+    rows: list[dict[str, float]] = []
+    for rest_time_s in [float(value) for value in cfg.get("behaviour", "rest_times_s")]:
+        metrics = [run_observed_model(cfg, seconds, seed0 + offset, rest_time_s) for offset in range(seeds)]
+        rows.append(summary_row({"rest_time_s": rest_time_s}, metrics))
+    return pd.DataFrame(rows)
 
-    min_len = min(len(macro), len(micro_mean))
-    data = pd.DataFrame(
-        {
-            "time_s": macro["time_s"].to_numpy()[:min_len],
-            "macro_energy": macro["energy"].to_numpy()[:min_len],
-            "micro_energy_mean": micro_mean["energy"].to_numpy()[:min_len],
-            "micro_energy_std": micro_std["energy"].to_numpy()[:min_len],
-        }
+
+def summary_row(prefix: dict[str, float], metrics: list[dict[str, float]]) -> dict[str, float]:
+    """Summarize repeated metrics with mean and standard deviation columns."""
+    row = dict(prefix)
+    for key in metrics[0]:
+        values = [metric[key] for metric in metrics]
+        row[f"mean_{key}"] = float(np.mean(values))
+        row[f"std_{key}"] = float(np.std(values, ddof=0))
+    row["seeds"] = float(len(metrics))
+    return row
+
+
+def plot_rest_time_energy_tradeoff(data: pd.DataFrame, path: str | Path) -> Path:
+    """Create the supporting rest-time effects figure."""
+    path = Path(path)
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 4.0))
+    fig.suptitle("Effect of Rest-Time Setting on Swarm Energy and Activity")
+    axes[0].set_title("A. Final net energy per robot")
+    axes[0].errorbar(
+        data["rest_time_s"],
+        data["mean_final_net_energy_per_robot"],
+        yerr=data["std_final_net_energy_per_robot"],
+        marker="o",
+        capsize=3,
+        color="tab:blue",
+        label="Mean across seeds",
     )
-    csv_path = out / "fig12_energy_divergence.csv"
-    data.to_csv(csv_path, index=False)
+    axes[0].set_xlabel("Rest-time setting (s)")
+    axes[0].set_ylabel("Final net energy per robot")
+    axes[0].legend(frameon=True, edgecolor="black")
 
-    fig, ax = plt.subplots(figsize=(6.1, 4.0))
-    ax.plot(data["time_s"], data["macro_energy"] / 1e5, label="Macro model", color="black", linestyle="--", linewidth=1.2)
-    ax.plot(data["time_s"], data["micro_energy_mean"] / 1e5, label="Micro average", color="tab:purple", linewidth=1.4)
-    ax.fill_between(
+    axes[1].set_title("B. Throughput per robot and active fraction")
+    line1 = axes[1].errorbar(
+        data["rest_time_s"],
+        data["mean_throughput_per_robot"],
+        yerr=data["std_throughput_per_robot"],
+        marker="o",
+        capsize=3,
+        color="tab:green",
+        label="Throughput per robot",
+    )
+    axes[1].set_xlabel("Rest-time setting (s)")
+    axes[1].set_ylabel("Throughput per robot (items s$^{-1}$ robot$^{-1}$)")
+    twin = axes[1].twinx()
+    line2 = twin.errorbar(
+        data["rest_time_s"],
+        data["mean_mean_active_fraction"],
+        yerr=data["std_mean_active_fraction"],
+        marker="s",
+        capsize=3,
+        color="tab:orange",
+        label="Mean active fraction",
+    )
+    twin.set_ylabel("Mean active fraction")
+    axes[1].legend([line1, line2], ["Throughput per robot", "Mean active fraction"], frameon=True, edgecolor="black")
+    for axis in axes:
+        axis.grid(True, linestyle="--", alpha=0.35)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_rest_time_energy_tradeoff_split(data: pd.DataFrame, out_dir: str | Path) -> list[Path]:
+    """Create separate supporting panels for the rest-time tradeoff figure.
+
+    Input:
+        data is the rest-time summary DataFrame and out_dir receives PNG files.
+
+    Output:
+        Paths to the written single-panel figures.
+    """
+    out = ensure_dir(out_dir)
+    paths = [
+        plot_errorbar_panel(
+            data,
+            "rest_time_s",
+            "mean_final_net_energy_per_robot",
+            "std_final_net_energy_per_robot",
+            out / "rest_time_final_net_energy_per_robot.png",
+            "Effect of Rest-Time Setting on Final Net Energy per Robot",
+            "Rest-time setting (s)",
+            "Final net energy per robot",
+        ),
+        plot_errorbar_panel(
+            data,
+            "rest_time_s",
+            "mean_throughput_per_robot",
+            "std_throughput_per_robot",
+            out / "rest_time_throughput_per_robot.png",
+            "Effect of Rest-Time Setting on Throughput per Robot",
+            "Rest-time setting (s)",
+            "Throughput per robot (items s$^{-1}$ robot$^{-1}$)",
+            color="tab:green",
+        ),
+        plot_errorbar_panel(
+            data,
+            "rest_time_s",
+            "mean_mean_active_fraction",
+            "std_mean_active_fraction",
+            out / "rest_time_active_fraction.png",
+            "Effect of Rest-Time Setting on Mean Active Fraction",
+            "Rest-time setting (s)",
+            "Mean active fraction",
+            color="tab:orange",
+        ),
+    ]
+    return paths
+
+
+def strategy_learning_entropy(
+    cfg: Config,
+    seconds: float,
+    seeds: int,
+    sample_every: float,
+    seed0: int,
+) -> pd.DataFrame:
+    """Sample propensity-weighted strategy ratio and entropy over time.
+
+    Inputs:
+        cfg is the model configuration, seconds is run length, seeds is repeated
+        runs, sample_every is the sampling interval, and seed0 is the first seed.
+
+    Output:
+        Seed-averaged time series for Figure 2.
+    """
+    traces: list[pd.DataFrame] = []
+    for offset in range(seeds):
+        model = MicroModel(cfg, seed=seed0 + offset)
+        steps = model.world.steps(seconds)
+        stride = max(1, model.world.steps(sample_every))
+        rows: list[dict[str, float]] = []
+        for step in range(steps):
+            stats = model.step()
+            if step % stride != 0 and step != steps - 1:
+                continue
+            rows.append(
+                {
+                    "time_s": (step + 1) * model.world.dt,
+                    "weighted_ratio": float(stats["mean_weighted_search_rest_ratio"]),
+                    "strategy_entropy": mean_strategy_entropy(model),
+                    "seed": float(seed0 + offset),
+                }
+            )
+        traces.append(pd.DataFrame(rows))
+    raw = pd.concat(traces, ignore_index=True)
+    return raw.groupby("time_s", as_index=False).agg(
+        mean_weighted_ratio=("weighted_ratio", "mean"),
+        std_weighted_ratio=("weighted_ratio", lambda values: float(values.std(ddof=0))),
+        mean_strategy_entropy=("strategy_entropy", "mean"),
+        std_strategy_entropy=("strategy_entropy", lambda values: float(values.std(ddof=0))),
+    )
+
+
+def mean_strategy_entropy(model: MicroModel) -> float:
+    """Return mean strategy entropy across agents in nats."""
+    entropies: list[float] = []
+    for agent in model.agents:
+        total = sum(agent.propensities)
+        if total <= 0.0:
+            entropies.append(0.0)
+            continue
+        probs = np.asarray([propensity / total for propensity in agent.propensities], dtype=float)
+        probs = probs[probs > 0.0]
+        entropies.append(float(-(probs * np.log(probs)).sum()))
+    return float(np.mean(entropies)) if entropies else 0.0
+
+
+def plot_strategy_learning_entropy(data: pd.DataFrame, path: str | Path) -> Path:
+    """Create presentation Figure 1: strategy ratio and entropy over time."""
+    path = Path(path)
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 4.0))
+    fig.suptitle("Temporal Evolution of Search/Rest Strategy Propensities")
+    axes[0].set_title("A. Mean propensity-weighted search/rest ratio")
+    axes[0].plot(data["time_s"], data["mean_weighted_ratio"], color="tab:blue", label="Mean across seeds")
+    axes[0].fill_between(
         data["time_s"],
-        (data["micro_energy_mean"] - data["micro_energy_std"]) / 1e5,
-        (data["micro_energy_mean"] + data["micro_energy_std"]) / 1e5,
+        data["mean_weighted_ratio"] - data["std_weighted_ratio"],
+        data["mean_weighted_ratio"] + data["std_weighted_ratio"],
+        color="tab:blue",
+        alpha=0.18,
+        label="Mean +/- standard deviation",
+    )
+    axes[0].set_xlabel("Time (s)")
+    axes[0].set_ylabel("Search/rest ratio")
+
+    axes[1].set_title("B. Mean strategy entropy")
+    axes[1].plot(data["time_s"], data["mean_strategy_entropy"], color="tab:purple", label="Mean across seeds")
+    axes[1].fill_between(
+        data["time_s"],
+        data["mean_strategy_entropy"] - data["std_strategy_entropy"],
+        data["mean_strategy_entropy"] + data["std_strategy_entropy"],
         color="tab:purple",
         alpha=0.18,
-        linewidth=0,
+        label="Mean +/- standard deviation",
     )
-    ax.set_xlim(0, cfg.duration_s)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel(r"Net energy ($10^5$ units)")
-    ax.set_title("Macro and micro energy over time")
-    ax.legend(loc="upper left", frameon=True, fancybox=False, edgecolor="black")
-    fig.tight_layout(pad=0.8)
-    png_path = out / "fig12_energy_divergence.png"
-    fig.savefig(png_path, dpi=160)
+    axes[1].set_xlabel("Time (s)")
+    axes[1].set_ylabel("Strategy entropy (nats)")
+    for axis in axes:
+        axis.grid(True, linestyle="--", alpha=0.35)
+        axis.legend(frameon=True, edgecolor="black")
+    fig.tight_layout()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
-    return png_path, csv_path
+    return path
 
 
-def make_all_plots(cfg: Config, out_dir: str | Path) -> list[Path]:
-    """Write all static plot outputs from the existing plotting workflow."""
+def plot_strategy_learning_entropy_split(data: pd.DataFrame, out_dir: str | Path) -> list[Path]:
+    """Create separate presentation panels for strategy ratio and entropy.
+
+    Input:
+        data is the strategy-learning time series and out_dir receives PNG files.
+
+    Output:
+        Paths to the written single-panel figures.
+    """
     out = ensure_dir(out_dir)
-    p8, csv = plot_fig8(cfg, out)
-    tau_r = float(cfg.get("behaviour", "default_rest_time_s"))
-    stride = _stride_steps(cfg)
-    macro = _macro_trace(cfg, tau_r, stride)
-    micro_runs = _micro_runs(cfg, tau_r, stride)
-    micro_mean, micro_std = _micro_mean_std(
-        micro_runs,
-        ["energy", "searching", "resting", "homing"],
+    specs = [
+        (
+            "mean_weighted_ratio",
+            "std_weighted_ratio",
+            "slide1_strategy_weighted_search_rest_ratio.png",
+            "Temporal Evolution of Propensity-Weighted Search/Rest Ratio",
+            "Search/rest ratio",
+            "tab:blue",
+        ),
+        (
+            "mean_strategy_entropy",
+            "std_strategy_entropy",
+            "slide1_strategy_entropy.png",
+            "Temporal Evolution of Strategy Entropy",
+            "Strategy entropy (nats)",
+            "tab:purple",
+        ),
+    ]
+    paths: list[Path] = []
+    for y_col, err_col, filename, title, ylabel, color in specs:
+        path = out / filename
+        fig, ax = plt.subplots(figsize=(7.2, 4.4))
+        ax.set_title(title)
+        ax.plot(data["time_s"], data[y_col], color=color, label="Mean across seeds")
+        ax.fill_between(
+            data["time_s"],
+            data[y_col] - data[err_col],
+            data[y_col] + data[err_col],
+            color=color,
+            alpha=0.18,
+            label="Mean +/- standard deviation",
+        )
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, linestyle="--", alpha=0.35)
+        ax.legend(frameon=True, edgecolor="black")
+        fig.tight_layout()
+        fig.savefig(path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        paths.append(path)
+    return paths
+
+
+def congestion_game_data(cfg: Config, seconds: float, seeds: int, seed0: int) -> pd.DataFrame:
+    """Measure congestion-game metrics across swarm sizes."""
+    rows: list[dict[str, float]] = []
+    for n_robots in SWARM_SIZES:
+        run_cfg = copy_config(cfg, n_robots=n_robots)
+        metrics = [run_observed_model(run_cfg, seconds, seed0 + offset) for offset in range(seeds)]
+        rows.append(summary_row({"n_robots": float(n_robots)}, metrics))
+    return pd.DataFrame(rows)
+
+
+def plot_congestion_game(data: pd.DataFrame, path: str | Path) -> Path:
+    """Create presentation Figure 2: swarm-size effects on payoff and congestion."""
+    path = Path(path)
+    fig, axes = plt.subplots(1, 3, figsize=(12.0, 4.0))
+    fig.suptitle("Effect of Swarm Size on Energy, Collision Probability, and Throughput")
+    panels = [
+        ("A. Final net energy per robot", "mean_final_net_energy_per_robot", "std_final_net_energy_per_robot", "Final net energy per robot"),
+        ("B. Mean collision probability", "mean_mean_collision_probability", "std_mean_collision_probability", "Mean collision probability"),
+        ("C. Throughput per robot", "mean_throughput_per_robot", "std_throughput_per_robot", "Throughput per robot (items s$^{-1}$ robot$^{-1}$)"),
+    ]
+    for axis, (title, y_col, err_col, ylabel) in zip(axes, panels):
+        axis.set_title(title)
+        axis.errorbar(data["n_robots"], data[y_col], yerr=data[err_col], marker="o", capsize=3, color="tab:blue")
+        axis.set_xscale("log", base=2)
+        axis.set_xticks(data["n_robots"])
+        axis.set_xticklabels([str(int(value)) for value in data["n_robots"]])
+        axis.set_xlabel("Number of robots")
+        axis.set_ylabel(ylabel)
+        axis.grid(True, linestyle="--", alpha=0.35)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_congestion_game_split(data: pd.DataFrame, out_dir: str | Path) -> list[Path]:
+    """Create separate presentation panels for the congestion figure.
+
+    Input:
+        data is the swarm-size summary DataFrame and out_dir receives PNG files.
+
+    Output:
+        Paths to the written single-panel figures.
+    """
+    out = ensure_dir(out_dir)
+    return [
+        plot_errorbar_panel(
+            data,
+            "n_robots",
+            "mean_final_net_energy_per_robot",
+            "std_final_net_energy_per_robot",
+            out / "slide2_swarm_size_energy_per_robot.png",
+            "Effect of Swarm Size on Final Net Energy per Robot",
+            "Number of robots",
+            "Final net energy per robot",
+            xscale="log2",
+        ),
+        plot_errorbar_panel(
+            data,
+            "n_robots",
+            "mean_mean_collision_probability",
+            "std_mean_collision_probability",
+            out / "slide2_swarm_size_collision_probability.png",
+            "Effect of Swarm Size on Mean Collision Probability",
+            "Number of robots",
+            "Mean collision probability",
+            xscale="log2",
+        ),
+        plot_errorbar_panel(
+            data,
+            "n_robots",
+            "mean_throughput_per_robot",
+            "std_throughput_per_robot",
+            out / "slide2_swarm_size_throughput_per_robot.png",
+            "Effect of Swarm Size on Throughput per Robot",
+            "Number of robots",
+            "Throughput per robot (items s$^{-1}$ robot$^{-1}$)",
+            xscale="log2",
+        ),
+    ]
+
+
+def plot_emergent_scaling(data: pd.DataFrame, path: str | Path) -> Path:
+    """Create presentation Figure 3: throughput scaling with population size."""
+    path = Path(path)
+    x = data["n_robots"].to_numpy(dtype=float)
+    y = data["mean_throughput"].to_numpy(dtype=float)
+    beta, intercept = fit_scaling_exponent(x, y)
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 4.0))
+    fig.suptitle("Scaling of Swarm Throughput with Population Size")
+    axes[0].set_title("A. Total throughput as a function of swarm size")
+    axes[0].errorbar(x, y, yerr=data["std_throughput"], fmt="o", capsize=3, color="tab:green", label="Simulation mean")
+    if np.isfinite(beta):
+        axes[0].plot(x, np.exp(intercept) * x**beta, "--", color="black", label="Power-law fit")
+        axes[0].text(0.05, 0.92, f"β = {beta:.2f}", transform=axes[0].transAxes)
+    if y[0] > 0.0:
+        axes[0].plot(x, y[0] * (x / x[0]), ":", color="0.4", label="Linear scaling reference")
+    axes[0].set_xscale("log", base=2)
+    axes[0].set_yscale("log")
+    axes[0].set_xlabel("Number of robots")
+    axes[0].set_ylabel("Total throughput (items s$^{-1}$)")
+    axes[0].legend(frameon=True, edgecolor="black")
+
+    axes[1].set_title("B. Per-robot throughput as a function of swarm size")
+    axes[1].errorbar(
+        x,
+        data["mean_throughput_per_robot"],
+        yerr=data["std_throughput_per_robot"],
+        fmt="o-",
+        capsize=3,
+        color="tab:blue",
+        label="Simulation mean",
     )
-    p9 = _save_fig9(cfg, out, tau_r, macro, micro_mean[["time_s", "energy"]], micro_std[["time_s", "energy"]])
-    p10 = _save_fig10(cfg, out, tau_r, macro, micro_mean[["time_s", "searching", "resting", "homing"]])
-    p11, c11 = plot_fig11_strategy_evolution(cfg, out)
-    p12, c12 = plot_fig12_energy_divergence(cfg, out)
-    macro_csv = out / f"macro_trace_tau_r_{int(tau_r)}.csv"
-    macro.to_csv(macro_csv, index=False)
-    clustering_plot_path = plot_clustering_comparison(cfg)
-    
-    return [p8, csv, p9, p10, p11, c11, p12, c12, macro_csv, clustering_plot_path]
+    axes[1].set_xscale("log", base=2)
+    axes[1].set_xlabel("Number of robots")
+    axes[1].set_ylabel("Throughput per robot (items s$^{-1}$ robot$^{-1}$)")
+    axes[1].legend(frameon=True, edgecolor="black")
+    for axis in axes:
+        axis.set_xticks(x)
+        axis.set_xticklabels([str(int(value)) for value in x])
+        axis.grid(True, linestyle="--", alpha=0.35)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
 
 
-def plot_clustering_comparison(cfg):
-    # Run 1: without learning (Stap 7 turned off)
-    model_off = MicroModel(cfg, use_spatial_learning=False)
-    df_off = model_off.run(seconds=4000, stride=4) # kortere duur voor snelle test
-    
-    # Run 2: with learning (Stap 7 turned on)
-    model_on = MicroModel(cfg, use_spatial_learning=True)
-    df_on = model_on.run(seconds=4000, stride=4)
-    
-    # plot the clustering index over time for both runs
-    plt.figure(figsize=(10, 5))
-    plt.plot(df_off["time_s"], df_off["clustering_index"], label="Without Learning (Homogeneous)", color="gray", linestyle="--")
-    plt.plot(df_on["time_s"], df_on["clustering_index"], label="With Learning (Spatial Memory)", color="tab:blue")
-    
-    plt.title("Swarm Clustering Over Time")
-    plt.xlabel("Simulation time (seconds)")
-    plt.ylabel("Clustering Index (Standard deviation of sectors)")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("clustering_comparison.png")
-    plt.close()
+def plot_emergent_scaling_split(data: pd.DataFrame, out_dir: str | Path) -> list[Path]:
+    """Create separate presentation panels for the throughput scaling figure.
 
+    Input:
+        data is the swarm-size summary DataFrame and out_dir receives PNG files.
+
+    Output:
+        Paths to the written single-panel figures.
+    """
+    out = ensure_dir(out_dir)
+    x = data["n_robots"].to_numpy(dtype=float)
+    y = data["mean_throughput"].to_numpy(dtype=float)
+    beta, intercept = fit_scaling_exponent(x, y)
+
+    total_path = out / "slide2_total_throughput_scaling.png"
+    fig, ax = plt.subplots(figsize=(7.2, 4.4))
+    ax.set_title("Scaling of Total Swarm Throughput with Population Size")
+    ax.errorbar(x, y, yerr=data["std_throughput"], fmt="o", capsize=3, color="tab:green", label="Simulation mean")
+    if np.isfinite(beta):
+        ax.plot(x, np.exp(intercept) * x**beta, "--", color="black", label="Power-law fit")
+        ax.text(0.05, 0.92, f"β = {beta:.2f}", transform=ax.transAxes)
+    if y[0] > 0.0:
+        ax.plot(x, y[0] * (x / x[0]), ":", color="0.4", label="Linear scaling reference")
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(int(value)) for value in x])
+    ax.set_xlabel("Number of robots")
+    ax.set_ylabel("Total throughput (items s$^{-1}$)")
+    ax.grid(True, linestyle="--", alpha=0.35)
+    ax.legend(frameon=True, edgecolor="black")
+    fig.tight_layout()
+    fig.savefig(total_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    per_robot_path = out / "slide2_per_robot_throughput_scaling.png"
+    plot_errorbar_panel(
+        data,
+        "n_robots",
+        "mean_throughput_per_robot",
+        "std_throughput_per_robot",
+        per_robot_path,
+        "Scaling of Per-Robot Throughput with Population Size",
+        "Number of robots",
+        "Throughput per robot (items s$^{-1}$ robot$^{-1}$)",
+        xscale="log2",
+    )
+    return [total_path, per_robot_path]
+
+
+def fit_scaling_exponent(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    """Fit log(y) = intercept + beta log(x) for positive values."""
+    mask = (x > 0.0) & (y > 0.0)
+    if mask.sum() < 2:
+        return float("nan"), float("nan")
+    beta, intercept = np.polyfit(np.log(x[mask]), np.log(y[mask]), 1)
+    return float(beta), float(intercept)
+
+
+def food_spawn_check_data(cfg: Config, seconds: float, seeds: int, seed0: int) -> pd.DataFrame:
+    """Measure food-spawn sensitivity with copied configurations."""
+    rows: list[dict[str, float]] = []
+    for multiplier in FOOD_MULTIPLIERS:
+        run_cfg = copy_config(cfg, food_multiplier=multiplier)
+        metrics = [run_observed_model(run_cfg, seconds, seed0 + offset) for offset in range(seeds)]
+        rows.append(summary_row({"food_spawn_multiplier": float(multiplier)}, metrics))
+    return pd.DataFrame(rows)
+
+
+def plot_food_spawn_check(data: pd.DataFrame, path: str | Path) -> Path:
+    """Create presentation Figure 7: food-spawn effects on energy and throughput."""
+    path = Path(path)
+    fig, axes = plt.subplots(1, 3, figsize=(12.0, 3.9))
+    fig.suptitle("Effect of Food Spawn Rate on Swarm Energy and Throughput")
+    panels = [
+        ("A. Final net energy per robot", "mean_final_net_energy_per_robot", "std_final_net_energy_per_robot", "Final net energy per robot"),
+        ("B. Throughput per robot", "mean_throughput_per_robot", "std_throughput_per_robot", "Throughput per robot (items s$^{-1}$ robot$^{-1}$)"),
+        ("C. Mean collision probability", "mean_mean_collision_probability", "std_mean_collision_probability", "Mean collision probability"),
+    ]
+    for axis, (title, y_col, err_col, ylabel) in zip(axes, panels):
+        axis.set_title(title)
+        axis.errorbar(data["food_spawn_multiplier"], data[y_col], yerr=data[err_col], marker="o", capsize=3)
+        axis.set_xscale("log", base=2)
+        axis.set_xticks(data["food_spawn_multiplier"])
+        axis.set_xticklabels([f"{value:g}x" for value in data["food_spawn_multiplier"]])
+        axis.set_xlabel("Food spawn-rate multiplier")
+        axis.set_ylabel(ylabel)
+        axis.grid(True, linestyle="--", alpha=0.35)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_food_spawn_check_split(data: pd.DataFrame, out_dir: str | Path) -> list[Path]:
+    """Create separate supporting panels for food-spawn effects.
+
+    Input:
+        data is the food-spawn summary DataFrame and out_dir receives PNG files.
+
+    Output:
+        Paths to the written single-panel figures.
+    """
+    out = ensure_dir(out_dir)
+    return [
+        plot_errorbar_panel(
+            data,
+            "food_spawn_multiplier",
+            "mean_final_net_energy_per_robot",
+            "std_final_net_energy_per_robot",
+            out / "food_spawn_energy_per_robot.png",
+            "Effect of Food Spawn Rate on Final Net Energy per Robot",
+            "Food spawn-rate multiplier",
+            "Final net energy per robot",
+            xscale="log2",
+            xtick_suffix="x",
+        ),
+        plot_errorbar_panel(
+            data,
+            "food_spawn_multiplier",
+            "mean_throughput_per_robot",
+            "std_throughput_per_robot",
+            out / "food_spawn_throughput_per_robot.png",
+            "Effect of Food Spawn Rate on Throughput per Robot",
+            "Food spawn-rate multiplier",
+            "Throughput per robot (items s$^{-1}$ robot$^{-1}$)",
+            xscale="log2",
+            xtick_suffix="x",
+            color="tab:green",
+        ),
+        plot_errorbar_panel(
+            data,
+            "food_spawn_multiplier",
+            "mean_mean_collision_probability",
+            "std_mean_collision_probability",
+            out / "food_spawn_collision_probability.png",
+            "Effect of Food Spawn Rate on Mean Collision Probability",
+            "Food spawn-rate multiplier",
+            "Mean collision probability",
+            xscale="log2",
+            xtick_suffix="x",
+            color="tab:orange",
+        ),
+    ]
+
+
+def plot_errorbar_panel(
+    data: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    err_col: str,
+    path: str | Path,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    *,
+    xscale: str | None = None,
+    xtick_suffix: str = "",
+    color: str = "tab:blue",
+) -> Path:
+    """Create one reusable error-bar panel from a summary DataFrame.
+
+    Inputs:
+        data is a summary DataFrame, x_col/y_col/err_col name the plotted
+        columns, path is the PNG destination, and labels describe the axes.
+
+    Output:
+        Path to the written single-panel figure.
+    """
+    path = Path(path)
+    x = data[x_col].to_numpy(dtype=float)
+    fig, ax = plt.subplots(figsize=(7.2, 4.4))
+    ax.set_title(title)
+    ax.errorbar(x, data[y_col], yerr=data[err_col], marker="o", capsize=3, color=color, label="Mean across seeds")
+    if xscale == "log2":
+        ax.set_xscale("log", base=2)
+    ax.set_xticks(x)
+    if xtick_suffix:
+        ax.set_xticklabels([f"{value:g}{xtick_suffix}" for value in x])
+    else:
+        ax.set_xticklabels([str(int(value)) if float(value).is_integer() else f"{value:g}" for value in x])
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, linestyle="--", alpha=0.35)
+    ax.legend(frameon=True, edgecolor="black")
+    fig.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def sector_scores_over_time(cfg: Config, seconds: float, seeds: int, sample_every: float, seed0: int) -> pd.DataFrame:
+    """Sample mean sector scores across agents and seeds over time."""
+    traces: list[pd.DataFrame] = []
+    for offset in range(seeds):
+        model = MicroModel(cfg, seed=seed0 + offset)
+        steps = model.world.steps(seconds)
+        stride = max(1, model.world.steps(sample_every))
+        rows: list[dict[str, float]] = []
+        for step in range(steps):
+            model.step()
+            if step % stride != 0 and step != steps - 1:
+                continue
+            scores = np.asarray([agent.sector_scores for agent in model.agents], dtype=float).mean(axis=0)
+            rows.append(
+                {
+                    "time_s": (step + 1) * model.world.dt,
+                    "sector_0": float(scores[0]),
+                    "sector_1": float(scores[1]),
+                    "sector_2": float(scores[2]),
+                    "sector_3": float(scores[3]),
+                }
+            )
+        traces.append(pd.DataFrame(rows))
+    raw = pd.concat(traces, ignore_index=True)
+    return raw.groupby("time_s", as_index=False).mean()
+
+
+def plot_sector_heatmap(data: pd.DataFrame, path: str | Path) -> Path:
+    """Create the supporting mean sector-score heatmap."""
+    path = Path(path)
+    values = data[["sector_0", "sector_1", "sector_2", "sector_3"]].to_numpy(dtype=float)
+    fig, ax = plt.subplots(figsize=(6.2, 4.2))
+    image = ax.imshow(values, aspect="auto", cmap="viridis")
+    ax.set_title("Mean sector score by arena sector")
+    ax.set_xticks([0, 1, 2, 3])
+    ax.set_xticklabels(["Sector 0", "Sector 1", "Sector 2", "Sector 3"])
+    ax.set_yticks(range(len(data)))
+    ax.set_yticklabels([f"{value:.0f}" for value in data["time_s"]])
+    ax.set_xlabel("Arena sector")
+    ax.set_ylabel("Time (s)")
+    fig.suptitle("Temporal Evolution of Mean Sector Scores")
+    fig.colorbar(image, ax=ax, label="Mean sector score")
+    fig.tight_layout()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
