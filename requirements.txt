@@ -1,0 +1,6 @@
+numpy>=1.26,<2
+pandas>=2.2
+matplotlib>=3.8
+pyyaml>=6
+pillow>=10
+SALib<1.5

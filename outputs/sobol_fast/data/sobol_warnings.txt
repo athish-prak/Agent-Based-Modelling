@@ -1,0 +1,2 @@
+Large out-of-range Sobol estimates detected:
+mean_collision_probability / n_robots: ST=1.223

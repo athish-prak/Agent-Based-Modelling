@@ -1,0 +1,48 @@
+# Liu, Winfield and Sa swarm-foraging validation parameters.
+# Table 1 in the paper reports values in seconds, metres, degrees, and units.
+paper:
+  n_robots: 8
+  duration_s: 20000
+  dt_s: 0.25
+
+map:
+  router_m: 3.0
+  rinner_m: 0.7
+  home_radius_m: 0.5
+
+robot:
+  speed_m_s: 0.15
+  turn_to_food_deg_s: 15.0
+  turn_home_deg_s: 20.0
+  camera_angle_deg: 60.0
+  bumper_angle_deg: 95.0
+  camera_range_m: 2.0
+  bumper_range_m: 0.4
+  robot_radius_m: 0.13
+  load_time_s: 2.0
+
+energy:
+  resting_cost: 1.0      # Er from Table 1
+  active_cost: 10.0      # alpha * Er from Table 1
+  food_reward: 2000.0    # Ec from Table 1
+
+behaviour:
+  avoidance_time_s: 2.0
+  search_time_s: 100.0
+  rest_times_s: [0, 40, 80, 120, 160, 200]
+  default_rest_time_s: 80
+  # Search/rest ratio strategies. Each ratio is converted into paired search and
+  # rest timers using search_time_s + default_rest_time_s as the cycle length.
+  strategy_search_rest_ratios: [0.5, 1.0, 1.5, 2.0]
+
+food:
+  growth_rate_s: 0.04        # p_new from Table 1; converted internally by dt
+  initial_count: 0.0       # not specified by the paper
+
+run:
+  micro_runs: 10
+  random_seed: 7
+  csv_stride_s: 5
+  animation_seconds: 2000
+  animation_playback_seconds: 50
+  animation_fps: 10
