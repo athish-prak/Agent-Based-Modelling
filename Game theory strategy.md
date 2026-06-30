@@ -12,11 +12,9 @@ Each robot repeatedly searches for food, grabs it, deposits it, rests, and then 
 
 The main learned strategy is:
 
-\[
-T_r \in \{20, 60, 100, 160\}\text{ seconds}
-\]
+$$T_r \in \{20, 60, 100, 160\}\text{ seconds}$$
 
-where \(T_r\) means **rest time**.
+where $T_r$ means **rest time**.
 
 ---
 
@@ -158,9 +156,7 @@ The model uses three important probabilities.
 
 ### 6.1 Food finding probability
 
-\[
-\gamma_f = \text{probability of finding food}
-\]
+$$\gamma_f = \text{probability of finding food}$$
 
 If there is more food, robots are more likely to find food.
 
@@ -168,21 +164,15 @@ If there is more food, robots are more likely to find food.
 
 ### 6.2 Robot collision probability
 
-\[
-\gamma_r = \text{probability of collision}
-\]
+$$\gamma_r = \text{probability of collision}$$
 
 This depends on how many robots are active.
 
-\[
-N_{active} = N_{robots} - N_{resting}
-\]
+$$N_{active} = N_{robots} - N_{resting}$$
 
 If many robots are active:
 
-\[
-N_{active} \uparrow \Rightarrow \gamma_r \uparrow
-\]
+$$N_{active} \uparrow \Rightarrow \gamma_r \uparrow$$
 
 So when many robots choose short rest times, they create congestion.
 
@@ -190,21 +180,15 @@ So when many robots choose short rest times, they create congestion.
 
 ### 6.3 Food loss probability
 
-\[
-\gamma_l = \text{probability of losing the food target}
-\]
+$$\gamma_l = \text{probability of losing the food target}$$
 
 This depends on competition around food.
 
-\[
-N_{competing} = N_{searching} + N_{grabbing} + N_{avoidance}
-\]
+$$N_{competing} = N_{searching} + N_{grabbing} + N_{avoidance}$$
 
 If many robots are competing:
 
-\[
-N_{competing} \uparrow \Rightarrow \gamma_l \uparrow
-\]
+$$N_{competing} \uparrow \Rightarrow \gamma_l \uparrow$$
 
 So food is harder to secure when too many robots are active.
 
@@ -214,9 +198,7 @@ So food is harder to secure when too many robots are active.
 
 When a robot is in `searching`, the model draws a random number:
 
-\[
-u \sim U(0,1)
-\]
+$$u \sim U(0,1)$$
 
 Then the robot decides what happens:
 
@@ -233,23 +215,15 @@ else:
 
 Mathematically:
 
-\[
-P(\text{collision}) = \gamma_r
-\]
+$$P(\text{collision}) = \gamma_r$$
 
-\[
-P(\text{find food}) = \gamma_f
-\]
+$$P(\text{find food}) = \gamma_f$$
 
-\[
-P(\text{keep searching}) = 1 - \gamma_r - \gamma_f
-\]
+$$P(\text{keep searching}) = 1 - \gamma_r - \gamma_f$$
 
 If the robot searches for too long without finding food, its search credit reaches zero:
 
-\[
-search\_credit \leq 0
-\]
+$$search\_credit \leq 0$$
 
 Then it gives up and goes home:
 
@@ -265,9 +239,7 @@ When a robot is in `grabbing`, it has already found food, but the grab is not gu
 
 Again the model draws:
 
-\[
-u \sim U(0,1)
-\]
+$$u \sim U(0,1)$$
 
 Then:
 
@@ -284,17 +256,11 @@ else:
 
 Mathematically:
 
-\[
-P(\text{collision}) = \gamma_r
-\]
+$$P(\text{collision}) = \gamma_r$$
 
-\[
-P(\text{lose food target}) = \gamma_l
-\]
+$$P(\text{lose food target}) = \gamma_l$$
 
-\[
-P(\text{continue grabbing}) = 1 - \gamma_r - \gamma_l
-\]
+$$P(\text{continue grabbing}) = 1 - \gamma_r - \gamma_l$$
 
 If the grabbing timer finishes, the robot moves to `deposit`:
 
@@ -312,9 +278,7 @@ When a robot is in `deposit`, it is carrying food back to the nest.
 
 It can still collide:
 
-\[
-P(\text{collision}) = \gamma_r
-\]
+$$P(\text{collision}) = \gamma_r$$
 
 If there is no collision, its deposit timer decreases.
 
@@ -326,9 +290,7 @@ DEPOSIT -> RESTING
 
 A completed deposit gives energy reward:
 
-\[
-+R_{food}
-\]
+$$+R_{food}$$
 
 ---
 
@@ -381,33 +343,23 @@ Each robot pays energy every simulation step.
 
 If resting:
 
-\[
-\text{cost} = c_{rest} \cdot dt
-\]
+$$\text{cost} = c_{rest} \cdot dt$$
 
 If active:
 
-\[
-\text{cost} = c_{active} \cdot dt
-\]
+$$\text{cost} = c_{active} \cdot dt$$
 
 The robot's trip payoff is updated as:
 
-\[
-trip\_delta \leftarrow trip\_delta - cost
-\]
+$$trip\_delta \leftarrow trip\_delta - cost$$
 
 When food is successfully delivered:
 
-\[
-trip\_delta \leftarrow trip\_delta + R_{food}
-\]
+$$trip\_delta \leftarrow trip\_delta + R_{food}$$
 
 So the trip payoff is:
 
-\[
-trip\_delta = \text{food reward} - \text{energy costs}
-\]
+$$trip\_delta = \text{food reward} - \text{energy costs}$$
 
 If the robot finds and deposits food efficiently, `trip_delta` is positive.
 
@@ -428,9 +380,7 @@ Strategy 3: rest for 160 seconds
 
 Mathematically:
 
-\[
-T_r \in \{20,60,100,160\}
-\]
+$$T_r \in \{20,60,100,160\}$$
 
 These are the only explicit strategies in the script.
 
@@ -449,15 +399,11 @@ They are not different search algorithms. They are different decisions about **h
 
 Short rest means:
 
-\[
-T_r \downarrow \Rightarrow N_{active} \uparrow
-\]
+$$T_r \downarrow \Rightarrow N_{active} \uparrow$$
 
 More active robots means:
 
-\[
-N_{active} \uparrow \Rightarrow \gamma_r \uparrow
-\]
+$$N_{active} \uparrow \Rightarrow \gamma_r \uparrow$$
 
 So short rest can be good individually, but bad collectively if too many robots do it.
 
@@ -560,29 +506,21 @@ In simple words:
 
 Each robot has four strategy weights called propensities:
 
-\[
-q = [q_{20}, q_{60}, q_{100}, q_{160}]
-\]
+$$q = [q_{20}, q_{60}, q_{100}, q_{160}]$$
 
 At the beginning:
 
-\[
-q = [10,10,10,10]
-\]
+$$q = [10,10,10,10]$$
 
 So all strategies are equally likely.
 
-The probability of choosing strategy \(i\) is:
+The probability of choosing strategy $i$ is:
 
-\[
-P_i = \frac{q_i}{\sum_j q_j}
-\]
+$$P_i = \frac{q_i}{\sum_j q_j}$$
 
 At the start:
 
-\[
-P_i = \frac{10}{40} = 0.25
-\]
+$$P_i = \frac{10}{40} = 0.25$$
 
 So each strategy has 25% probability.
 
@@ -594,25 +532,19 @@ At the end of a trip, the robot evaluates the strategy it just used.
 
 Let:
 
-\[
-x = trip\_delta
-\]
+$$x = trip\_delta$$
 
-where \(x\) is the net payoff from the trip.
+where $x$ is the net payoff from the trip.
 
 If the trip made energy:
 
-\[
-x > 0
-\]
+$$x > 0$$
 
 If the trip lost energy:
 
-\[
-x < 0
-\]
+$$x < 0$$
 
-The model converts \(x\) into subjective utility.
+The model converts $x$ into subjective utility.
 
 ---
 
@@ -622,25 +554,17 @@ The script uses a prospect-theory-style utility function.
 
 For gains:
 
-\[
-U(x) = x^\alpha \quad \text{if } x \geq 0
-\]
+$$U(x) = x^\alpha \quad \text{if } x \geq 0$$
 
 For losses:
 
-\[
-U(x) = -\lambda(-x)^\alpha \quad \text{if } x < 0
-\]
+$$U(x) = -\lambda(-x)^\alpha \quad \text{if } x < 0$$
 
 The parameters are:
 
-\[
-\alpha = 0.88
-\]
+$$\alpha = 0.88$$
 
-\[
-\lambda = 2.25
-\]
+$$\lambda = 2.25$$
 
 ---
 
@@ -648,21 +572,15 @@ The parameters are:
 
 Because:
 
-\[
-0 < \alpha < 1
-\]
+$$0 < \alpha < 1$$
 
 large gains have diminishing value.
 
 Example:
 
-\[
-100^{0.88} \approx 57.5
-\]
+$$100^{0.88} \approx 57.5$$
 
-\[
-200^{0.88} \approx 105.9
-\]
+$$200^{0.88} \approx 105.9$$
 
 Doubling the gain from 100 to 200 does not double the utility.
 
@@ -676,21 +594,15 @@ That is risk aversion for gains.
 
 Losses are multiplied by:
 
-\[
-\lambda = 2.25
-\]
+$$\lambda = 2.25$$
 
 So losses hurt more than equal gains help.
 
 Example:
 
-\[
-U(100) = 100^{0.88} \approx 57.5
-\]
+$$U(100) = 100^{0.88} \approx 57.5$$
 
-\[
-U(-100) = -2.25(100^{0.88}) \approx -129.5
-\]
+$$U(-100) = -2.25(100^{0.88}) \approx -129.5$$
 
 So losing 100 energy hurts more than gaining 100 energy helps.
 
@@ -704,21 +616,15 @@ In plain English:
 
 The subjective utility is normalized:
 
-\[
-utility\_factor = \frac{U(x)}{R_{food}^{\alpha}}
-\]
+$$utility\_factor = \frac{U(x)}{R_{food}^{\alpha}}$$
 
 The robot also considers its current energy level:
 
-\[
-energy\_factor = \frac{energy - R_{food}}{R_{food}}
-\]
+$$energy\_factor = \frac{energy - R_{food}}{R_{food}}$$
 
 Then the final learning reward is:
 
-\[
-learning\_reward = 5 \cdot utility\_factor + 2 \cdot energy\_factor
-\]
+$$learning\_reward = 5 \cdot utility\_factor + 2 \cdot energy\_factor$$
 
 So the update uses:
 
@@ -734,29 +640,21 @@ The recent trip is weighted more strongly because it has coefficient 5.
 
 Only the strategy that was just used gets updated.
 
-If strategy \(i\) was used, then:
+If strategy $i$ was used, then:
 
-\[
-q_i(t+1) = (1 - \rho)q_i(t) + learning\_reward
-\]
+$$q_i(t+1) = (1 - \rho)q_i(t) + learning\_reward$$
 
 where:
 
-\[
-\rho = 0.05
-\]
+$$\rho = 0.05$$
 
 So:
 
-\[
-q_i(t+1) = 0.95q_i(t) + learning\_reward
-\]
+$$q_i(t+1) = 0.95q_i(t) + learning\_reward$$
 
 The script also prevents propensities from falling below 0.1:
 
-\[
-q_i(t+1) = \max(0.1, q_i(t+1))
-\]
+$$q_i(t+1) = \max(0.1, q_i(t+1))$$
 
 This means bad strategies become unlikely, but never impossible.
 
@@ -766,33 +664,21 @@ This means bad strategies become unlikely, but never impossible.
 
 Suppose a robot has:
 
-\[
-q = [20,10,5,5]
-\]
+$$q = [20,10,5,5]$$
 
 Then:
 
-\[
-\sum q = 40
-\]
+$$\sum q = 40$$
 
 The probabilities are:
 
-\[
-P_{20} = \frac{20}{40} = 0.50
-\]
+$$P_{20} = \frac{20}{40} = 0.50$$
 
-\[
-P_{60} = \frac{10}{40} = 0.25
-\]
+$$P_{60} = \frac{10}{40} = 0.25$$
 
-\[
-P_{100} = \frac{5}{40} = 0.125
-\]
+$$P_{100} = \frac{5}{40} = 0.125$$
 
-\[
-P_{160} = \frac{5}{40} = 0.125
-\]
+$$P_{160} = \frac{5}{40} = 0.125$$
 
 So the robot is most likely to choose 20 seconds, but it can still explore other strategies.
 
@@ -808,77 +694,54 @@ This is not a full strategy update. It is a temporary safety check.
 
 The robot remembers recent personal collision and food rates:
 
-\[
-\bar{\gamma}_r = \text{average recent collision rate}
-\]
+$$\bar{\gamma}_r = \text{average recent collision rate}$$
 
-\[
-\bar{\gamma}_f = \text{average recent food encounter rate}
-\]
+$$\bar{\gamma}_f = \text{average recent food encounter rate}$$
 
 It estimates the probability of finding food during a search:
 
-\[
-P(\text{find food}) = 1 - (1 - \bar{\gamma}_f)^{T_s}
-\]
+$$P(\text{find food}) = 1 - (1 - \bar{\gamma}_f)^{T_s}$$
 
 Expected reward:
 
-\[
-E[R] = P(\text{find food})R_{food}
-\]
+$$E[R] = P(\text{find food})R_{food}$$
 
 Expected base cost:
 
-\[
-C_{base} = T_s c_{active}dt
-\]
+$$C_{base} = T_s c_{active}dt$$
 
 Expected collision cost:
 
-\[
-C_{collision} = \bar{\gamma}_r T_s T_a c_{active}dt
-\]
+$$C_{collision} = \bar{\gamma}_r T_s T_a c_{active}dt$$
 
 Total expected cost:
 
-\[
-E[C] = C_{base} + C_{collision}
-\]
+$$E[C] = C_{base} + C_{collision}$$
 
 The robot may snooze if:
 
-\[
-\bar{\gamma}_r > congestion\_tolerance
-\]
+$$\bar{\gamma}_r > congestion\_tolerance$$
 
 and:
 
-\[
-E[R] < E[C]
-\]
+$$E[R] < E[C]$$
 
 If both are true, it snoozes with probability 0.75.
 
 If it snoozes:
 
-\[
-timer = 0.5T_r
-\]
+$$timer = 0.5T_r$$
 
 Simple interpretation:
 
 > If recent collisions are high and expected reward is not worth the expected cost, the robot waits longer before searching again.
-
 ---
 
 # 26. Sector scores: what they are
 
 Each robot also has four sector scores:
 
-\[
-sector\_scores = [s_0, s_1, s_2, s_3]
-\]
+$$sector\_scores = [s_0, s_1, s_2, s_3]$$
 
 The arena is split into four quadrants:
 
@@ -895,9 +758,7 @@ The arena is split into four quadrants:
 
 The exact sector is calculated from the robot's angle:
 
-\[
-\theta = atan2(y,x)
-\]
+$$\theta = atan2(y,x)$$
 
 Then the angle is converted into one of four sectors.
 
@@ -913,9 +774,7 @@ There are two updates:
 
 If the robot is searching and does **not** find food, the score of its current sector decreases slightly:
 
-\[
-s_k \leftarrow \max(0, s_k - sector\_decay)
-\]
+$$s_k \leftarrow \max(0, s_k - sector\_decay)$$
 
 This happens inside the searching step when nothing useful happens.
 
@@ -939,9 +798,7 @@ Meaning:
 
 If the robot successfully finishes grabbing food, the score of its current sector increases:
 
-\[
-s_k \leftarrow s_k + sector\_reward
-\]
+$$s_k \leftarrow s_k + sector\_reward$$
 
 Visual:
 
@@ -962,9 +819,7 @@ Meaning:
 
 When a robot is searching, it looks at its sector scores:
 
-\[
-best\_sector = \arg\max_k s_k
-\]
+$$best\_sector = \arg\max_k s_k$$
 
 If all scores are zero, it just wanders randomly.
 
@@ -982,21 +837,15 @@ Robot heading is gently pulled toward S1
 
 The steering is not instant. The model blends the current heading with the target sector direction:
 
-\[
-heading \leftarrow heading + w \cdot angle\_gap
-\]
+$$heading \leftarrow heading + w \cdot angle\_gap$$
 
 where:
 
-\[
-w = sector\_pull
-\]
+$$w = sector\_pull$$
 
 Default:
 
-\[
-sector\_pull = 0.20
-\]
+$$sector\_pull = 0.20$$
 
 So the robot turns gradually, not sharply.
 
@@ -1008,9 +857,7 @@ Sector learning affects the display movement.
 
 But the actual probability of finding food is still computed globally using:
 
-\[
-\gamma_f
-\]
+$$\gamma_f$$
 
 So the visual motion may look spatially intelligent, but the core food-finding event is not fully local.
 
@@ -1073,35 +920,25 @@ The model behaves like a congestion game.
 
 Each robot chooses a rest-time strategy:
 
-\[
-T_r \in \{20,60,100,160\}
-\]
+$$T_r \in \{20,60,100,160\}$$
 
 The payoff depends on its own choice and the choices of other robots.
 
 If many robots choose short rest:
 
-\[
-T_r \downarrow \Rightarrow N_{active} \uparrow
-\]
+$$T_r \downarrow \Rightarrow N_{active} \uparrow$$
 
 Then:
 
-\[
-N_{active} \uparrow \Rightarrow \gamma_r \uparrow
-\]
+$$N_{active} \uparrow \Rightarrow \gamma_r \uparrow$$
 
 Then:
 
-\[
-\gamma_r \uparrow \Rightarrow \text{more collisions}
-\]
+$$\gamma_r \uparrow \Rightarrow \text{more collisions}$$
 
 Then:
 
-\[
-\text{more collisions} \Rightarrow \text{lower payoff}
-\]
+$$\text{more collisions} \Rightarrow \text{lower payoff}$$
 
 So one robot's strategy changes the environment for everyone else.
 
@@ -1113,15 +950,11 @@ That is the game-theoretic part.
 
 Short rest can be individually attractive because the robot searches more often:
 
-\[
-T_r \downarrow \Rightarrow \text{more food opportunities}
-\]
+$$T_r \downarrow \Rightarrow \text{more food opportunities}$$
 
 But if too many robots do this:
 
-\[
-\gamma_r \uparrow
-\]
+$$\gamma_r \uparrow$$
 
 and collisions increase.
 
@@ -1168,20 +1001,15 @@ Instead, strategies evolve as probabilities inside each robot.
 
 A strategy that produces good trips gets a higher propensity:
 
-\[
-q_i \uparrow \Rightarrow P_i \uparrow
-\]
+$$q_i \uparrow \Rightarrow P_i \uparrow$$
 
 A strategy that produces bad trips gets a lower propensity:
 
-\[
-q_i \downarrow \Rightarrow P_i \downarrow
-\]
+$$q_i \downarrow \Rightarrow P_i \downarrow$$
 
 Over time, the swarm can shift toward the rest times that work better under current congestion and food conditions.
 
 ---
-
 # 35. Full model logic in one diagram
 
 ```text
