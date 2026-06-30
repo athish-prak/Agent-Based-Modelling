@@ -34,7 +34,9 @@ class Agent:
     memory_gamma_r: list[float] = field(default_factory=list)
     memory_gamma_f: list[float] = field(default_factory=list)
     
-    strategies: list[int] = field(default_factory=list)
+    strategy_ratios: list[float] = field(default_factory=list)
+    search_strategy_steps: list[int] = field(default_factory=list)
+    rest_strategy_steps: list[int] = field(default_factory=list)
     propensities: list[float] = field(default_factory=list)
     current_strategy_idx: int = 0
     sector_scores: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
@@ -59,15 +61,23 @@ def get_sector(x: float, y: float) -> int:
 class MicroModel:
     """Track each robot's state, timers, energy contribution, and display position."""
 
-    def __init__(self, cfg: Config, rest_time_s: float | None = None, seed: int | None = None, use_spatial_learning: bool = True, **kwargs):
+    def __init__(self, cfg: Config, rest_time_s: float | None = None, seed: int | None = None, **kwargs):
         """Create a micro model from configuration and optional behaviour parameters."""
         self.cfg = cfg
         self.world = PaperMap.from_config(cfg)
-        self.use_spatial_learning = use_spatial_learning
         seed_value = seed if seed is not None else int(cfg.get("run", "random_seed", default=1))
         self.rng = random.Random(seed_value)
         self.food_rng = random.Random(seed_value + 1)
         self.rest_time_s = float(rest_time_s if rest_time_s is not None else cfg.get("behaviour", "default_rest_time_s"))
+        self.base_search_time_s = float(cfg.get("behaviour", "search_time_s"))
+        self.strategy_cycle_time_s = float(
+            cfg.get(
+                "behaviour",
+                "strategy_cycle_time_s",
+                default=self.base_search_time_s + self.rest_time_s,
+            )
+        )
+        self.strategy_ratios = self._load_strategy_ratios()
         
         self.alpha = kwargs.get("alpha", 0.88)
         self.lambda_loss = kwargs.get("lambda_loss", 2.25)
@@ -78,7 +88,7 @@ class MicroModel:
         self.sector_reward = float(kwargs.get("sector_reward", 1.0))
         self.sector_pull = float(kwargs.get("sector_pull", 0.20))
         
-        self.ts = self.world.steps(float(cfg.get("behaviour", "search_time_s")))
+        self.ts = self.world.steps(self.base_search_time_s)
         self.ta = self.world.steps(float(cfg.get("behaviour", "avoidance_time_s")))
         self.tg = self.world.steps(self.world.tau_grab)
         self.td = self.world.steps(self.world.tau_deposit)
@@ -90,23 +100,25 @@ class MicroModel:
         self.food_reward = float(cfg.get("energy", "food_reward"))
         self.agents = [self._new_agent() for _ in range(self.world.n_robots)]
         self.food_positions: list[tuple[float, float]] = []
+        self.total_collisions = 0.0
+        self.total_completed_deposit = 0.0
+        self.total_entered_deposit = 0.0
         self._sync_food_positions()
 
     def _new_agent(self) -> Agent:
         """Create one robot with a random starting position and strategy weights."""
         r = self.rng.uniform(self.world.rinner, self.world.router)
         theta = self.rng.uniform(0.0, 2.0 * math.pi)
-        
-        strategy_seconds = [20, 60, 100, 160]
-        strategies_steps = [self.world.steps(s) for s in strategy_seconds]
-        num_strategies = len(strategies_steps)
+        search_steps, rest_steps = self._build_ratio_strategy_steps()
+        num_strategies = len(self.strategy_ratios)
         
         start_idx = self.rng.randint(0, num_strategies - 1)
+        starting_search_steps = search_steps[start_idx]
         
         return Agent(
             state="searching",
-            timer=self.ts,
-            search_credit=self.ts,
+            timer=starting_search_steps,
+            search_credit=starting_search_steps,
             return_state="",
             return_timer=0,
             x=r * math.cos(theta),
@@ -119,10 +131,48 @@ class MicroModel:
             trip_active_steps=0,
             memory_gamma_r=[],
             memory_gamma_f=[],
-            strategies=strategies_steps,
+            strategy_ratios=list(self.strategy_ratios),
+            search_strategy_steps=search_steps,
+            rest_strategy_steps=rest_steps,
             propensities=[10.0] * num_strategies,
             current_strategy_idx=start_idx
         )
+
+    def _load_strategy_ratios(self) -> list[float]:
+        """Read and validate search/rest ratio strategies from configuration.
+
+        Input:
+            The model configuration, optionally containing
+            behaviour.strategy_search_rest_ratios.
+
+        Output:
+            A non-empty list of positive search_time/rest_time ratios.
+        """
+        raw = self.cfg.get("behaviour", "strategy_search_rest_ratios", default=[0.5, 1.0, 1.5, 2.0])
+        ratios = [float(value) for value in raw]
+        ratios = [value for value in ratios if value > 0.0 and math.isfinite(value)]
+        if not ratios:
+            raise ValueError("behaviour.strategy_search_rest_ratios must contain at least one positive value")
+        return ratios
+
+    def _build_ratio_strategy_steps(self) -> tuple[list[int], list[int]]:
+        """Convert ratio strategies into paired search and rest timers.
+
+        Input:
+            The configured strategy cycle length and search/rest ratios.
+
+        Output:
+            Two lists of timer steps: one for search duration and one for rest
+            duration, aligned by strategy index.
+        """
+        search_steps: list[int] = []
+        rest_steps: list[int] = []
+        for ratio in self.strategy_ratios:
+            rest_time_s = self.strategy_cycle_time_s / (1.0 + ratio)
+            search_time_s = self.strategy_cycle_time_s - rest_time_s
+            search_steps.append(max(1, self.world.steps(search_time_s)))
+            rest_steps.append(max(0, self.world.steps(rest_time_s)))
+        return search_steps, rest_steps
 
     def run(self, seconds: float | None = None, stride: int = 1, keep_frames: bool = False) -> pd.DataFrame:
         """Run the model and return sampled state, energy, and optional frame data."""
@@ -139,14 +189,6 @@ class MicroModel:
                 if keep_frames:
                     stats["positions"] = [(a.x, a.y, a.state) for a in self.agents]
                     stats["food_positions"] = list(self.food_positions)
-                sector_counts = [0, 0, 0, 0]
-                for a in self.agents:
-                    if a.state in {"searching", "grabbing", "avoidance"}:
-                        s = get_sector(a.x, a.y)
-                        sector_counts[s] += 1
-                mean_counts = sum(sector_counts) / 4
-                variance = sum((x - mean_counts) ** 2 for x in sector_counts) / 4
-                stats["clustering_index"] = math.sqrt(variance)
                 rows.append(stats)
         return pd.DataFrame(rows)
 
@@ -211,17 +253,25 @@ class MicroModel:
                 self._step_resting(agent)
 
         self.food = max(0.0, self.food + self.world.p_new_per_step - entered_deposit)
+        self.total_entered_deposit += float(entered_deposit)
+        self.total_completed_deposit += float(completed_deposit)
         self._sync_food_positions()
         counts = self.counts()
         active = self.world.n_robots - counts["resting"]
         self.energy += self.food_reward * completed_deposit - self.world.dt * (
             self.resting_cost * counts["resting"] + self.active_cost * active
         )
+        ratio_stats = self._ratio_stats()
         counts["gamma_f"] = gamma_f
         counts["gamma_r"] = gamma_r
         counts["gamma_l"] = gamma_l
         counts["entered_deposit"] = float(entered_deposit)
         counts["completed_deposit"] = float(completed_deposit)
+        counts["active_fraction"] = active / max(1, self.world.n_robots)
+        counts["total_collisions"] = self.total_collisions
+        counts["total_entered_deposit"] = self.total_entered_deposit
+        counts["total_completed_deposit"] = self.total_completed_deposit
+        counts.update(ratio_stats)
         return counts
 
     def _step_searching(self, agent: Agent, gamma_f: float, gamma_r: float) -> int:
@@ -358,12 +408,13 @@ class MicroModel:
             if len(agent.memory_gamma_r) > 0:
                 avg_gamma_r = sum(agent.memory_gamma_r) / len(agent.memory_gamma_r)
                 avg_gamma_f = sum(agent.memory_gamma_f) / len(agent.memory_gamma_f)
+                search_steps = self._current_search_steps(agent)
                 
-                prob_find_in_trip = 1.0 - (1.0 - avg_gamma_f) ** self.ts
+                prob_find_in_trip = 1.0 - (1.0 - avg_gamma_f) ** search_steps
                 expected_reward = prob_find_in_trip * self.food_reward
                 
-                base_cost = self.ts * (self.active_cost * self.world.dt)
-                collision_cost = avg_gamma_r * self.ts * self.ta * (self.active_cost * self.world.dt)
+                base_cost = search_steps * (self.active_cost * self.world.dt)
+                collision_cost = avg_gamma_r * search_steps * self.ta * (self.active_cost * self.world.dt)
                 expected_cost = base_cost + collision_cost
                 
                 if avg_gamma_r > self.congestion_tolerance and expected_reward < expected_cost:
@@ -371,11 +422,11 @@ class MicroModel:
                         snooze = True
             
             if snooze:
-                agent.timer = max(1, int(agent.strategies[agent.current_strategy_idx] * 0.5))
+                agent.timer = max(1, int(self._current_rest_steps(agent) * 0.5))
             else:
                 agent.state = "searching"
-                agent.search_credit = self.ts
-                agent.timer = self.ts
+                agent.search_credit = self._current_search_steps(agent)
+                agent.timer = agent.search_credit
 
     def _go_avoidance(self, agent: Agent, previous: str, previous_timer: int) -> None:
         """Move a robot into avoidance while remembering the interrupted state."""
@@ -384,6 +435,7 @@ class MicroModel:
         agent.state = "avoidance"
         agent.timer = self.ta
         agent.trip_collisions += 1
+        self.total_collisions += 1.0
 
     def _go_homing(self, agent: Agent) -> None:
         """Send a robot back toward the nest."""
@@ -442,12 +494,74 @@ class MicroModel:
                 agent.current_strategy_idx = i
                 break
                 
-        agent.timer = agent.strategies[agent.current_strategy_idx]
+        agent.timer = self._current_rest_steps(agent)
         
         agent.search_credit = 0
         agent.return_state = ""
         agent.return_timer = 0
         agent.trip_delta = 0.0
+
+    def _current_search_steps(self, agent: Agent) -> int:
+        """Return the search timer for an agent's selected ratio strategy.
+
+        Input:
+            One Agent with a current strategy index.
+
+        Output:
+            The search duration in model steps for that strategy.
+        """
+        return agent.search_strategy_steps[agent.current_strategy_idx]
+
+    def _current_rest_steps(self, agent: Agent) -> int:
+        """Return the rest timer for an agent's selected ratio strategy.
+
+        Input:
+            One Agent with a current strategy index.
+
+        Output:
+            The rest duration in model steps for that strategy.
+        """
+        return agent.rest_strategy_steps[agent.current_strategy_idx]
+
+    def _current_ratio(self, agent: Agent) -> float:
+        """Return the selected search/rest ratio for one agent.
+
+        Input:
+            One Agent with a current strategy index.
+
+        Output:
+            The selected search_time/rest_time ratio.
+        """
+        return agent.strategy_ratios[agent.current_strategy_idx]
+
+    def _ratio_stats(self) -> dict[str, float]:
+        """Summarize selected and propensity-weighted ratios across robots.
+
+        Input:
+            The model's current list of agents.
+
+        Output:
+            Mean selected ratio, mean weighted ratio, and mean selected search
+            and rest durations in seconds.
+        """
+        selected_ratios = [self._current_ratio(agent) for agent in self.agents]
+        selected_search = [self._current_search_steps(agent) * self.world.dt for agent in self.agents]
+        selected_rest = [self._current_rest_steps(agent) * self.world.dt for agent in self.agents]
+        weighted_ratios = []
+        for agent in self.agents:
+            total = sum(agent.propensities)
+            if total <= 0.0:
+                weighted_ratios.append(self._current_ratio(agent))
+            else:
+                weighted_ratios.append(
+                    sum(ratio * propensity for ratio, propensity in zip(agent.strategy_ratios, agent.propensities)) / total
+                )
+        return {
+            "mean_selected_search_rest_ratio": sum(selected_ratios) / len(selected_ratios),
+            "mean_weighted_search_rest_ratio": sum(weighted_ratios) / len(weighted_ratios),
+            "mean_selected_search_time_s": sum(selected_search) / len(selected_search),
+            "mean_selected_rest_time_s": sum(selected_rest) / len(selected_rest),
+        }
 
     def counts(self) -> dict[str, float]:
         """Count how many robots are in each PFSM state."""
@@ -472,17 +586,14 @@ class MicroModel:
             return
 
         agent.heading += random_turn
-
-        if agent.state == "searching" and self.use_spatial_learning:
+        if agent.state == "searching":
             self._steer_toward_best_sector(agent)
-
         if agent.state in {"deposit", "homing"} or agent.return_state in {"deposit", "homing"}:
             target = math.atan2(-agent.y, -agent.x)
             agent.heading = 0.85 * agent.heading + 0.15 * target
         agent.x += step * math.cos(agent.heading)
         agent.y += step * math.sin(agent.heading)
         radius = math.hypot(agent.x, agent.y)
-
         if radius > self.world.router:
             agent.heading += math.pi
             scale = self.world.router / max(radius, 1e-9)
